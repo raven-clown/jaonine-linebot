@@ -28,6 +28,8 @@ prisma/schema.prisma          schema ตาม 03-database-schema.md
 - สมัคร Supabase หรือ Neon (Postgres free tier) → ได้ `DATABASE_URL`
 - สมัคร Render.com หรือ Fly.io (free tier hosting)
 
+> Database พร้อมใช้แล้ว: provision Supabase project ชื่อ `jaonine` (ref `ojsbateovtayqxdpbrkr`) ไว้ให้แล้ว สร้างตารางครบทั้ง 7 ตามสคีมาปัจจุบัน (รวม `NotificationPreference`) และเปิด Row Level Security ทุกตาราง `DATABASE_URL` กรอกไว้ใน `.env` แล้ว เหลือแค่กรอก `LINE_CHANNEL_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN`
+
 ### 2. ติดตั้งและตั้งค่า
 
 ```bash
@@ -60,9 +62,23 @@ npm run start:dev
 |---|---|
 | `สร้างงาน` | เริ่ม flow สร้างงานใหม่ (ถาม หัวข้อ → รายละเอียด → ความสำคัญ → เส้นตาย → โหมดมอบหมาย → ผู้รับ) |
 | `งาน` / `list` | แสดงรายการงานที่ยังไม่เสร็จในกลุ่ม |
+| `ตั้งแจ้งเตือน` | ตั้งค่าการแจ้งเตือนเดดไลน์ของตัวเอง (ดูหัวข้อถัดไป) |
 | `ยกเลิก` | ยกเลิก flow ที่กำลังทำอยู่ |
 | `help` / `ช่วยเหลือ` | แสดงคำสั่งทั้งหมด |
 | ปุ่มใต้การ์ดงาน | รับงาน / ทำเสร็จแล้ว / ถอนงาน |
+
+## ตั้งค่าการแจ้งเตือนเดดไลน์ (ต่อคน)
+
+พิมพ์ `ตั้งแจ้งเตือน` ในแชทกลุ่ม แล้วเลือกโหมดที่ต้องการ — **แต่ละคนตั้งของตัวเองได้อิสระ** ไม่กระทบคนอื่นในกลุ่ม:
+
+| โหมด | พฤติกรรม |
+|---|---|
+| 🔔 มาตรฐาน (ค่าเริ่มต้น) | เตือนล่วงหน้า 1 เดือน, 15/12/9/7/5/3/1 วัน, และ 12/6/3/1 ชม. ก่อนเดดไลน์ (ดู `DEFAULT_OFFSETS_MIN` ใน `src/notifications/reminder-schedule.util.ts`) |
+| ⏱️ แจ้งตอนหมดเวลาอย่างเดียว | ไม่มีเตือนล่วงหน้า แจ้งครั้งเดียวตอนถึงเวลาเดดไลน์พอดี |
+| 🛠️ กำหนดเอง | พิมพ์ระยะเวลาที่ต้องการเอง เช่น `1mo 15d 7d 3d 1d 12h 6h 1h` (`mo`=เดือน, `d`=วัน, `h`=ชม.) |
+| 🔕 ปิดแจ้งเตือน | ไม่มีเตือนล่วงหน้าและไม่มีเตือนซ้ำตอนเลยเดดไลน์ (ยังได้รับแจ้งตอนถูกมอบหมายงานตามปกติ เพราะเป็นคนละประเภทกับเตือนเดดไลน์) |
+
+Business logic: `TasksService.createTask` และ `claimTask` เรียก `NotificationsService.scheduleDeadlineReminders(taskId, deadline, recipientUserId)` ซึ่งจะ resolve preference ของ "ผู้รับผิดชอบงานนั้น" (ไม่ใช่ preference กลางของบอท) แล้วสร้างแถว `NotificationSchedule` ล่วงหน้าตามจำนวนจุดเตือนที่ต้องส่ง — ตัดจุดที่เวลาผ่านไปแล้วออกอัตโนมัติ ตอนถอนงาน/ทำเสร็จ/ยกเลิกงาน ระบบจะลบเตือนที่ยังไม่ส่งของงานนั้นทิ้งให้ (`cancelPendingDeadlineReminders`) กันไม่ให้เตือนซ้ำหลังงานจบไปแล้ว
 
 ## Business logic ที่ทำไว้ตาม roadmap
 
@@ -70,7 +86,7 @@ npm run start:dev
 - **Phase 2**: `UsersService.ensureUserAndGroup` auto-create User/Group/GroupMember ตอนมีคนทักบอทครั้งแรกในกลุ่ม
 - **Phase 3**: `ConversationService` เก็บ state การสนทนาแบบ in-memory ต่อ (group, user) — เหมาะกับรัน instance เดียวตอน MVP (ดู `05-scaling-plan.md` ถ้าจะ scale เป็นหลาย instance ค่อยย้ายไป Redis)
 - **Phase 4**: `TasksService.claimTask` ใช้ conditional update (`updateMany` ด้วย where เงื่อนไขสถานะ) ป้องกัน race condition ตอนสองคนกด "รับงาน" พร้อมกัน, เช็ค `maxOpenTasks` ก่อนให้ assign/claim สำเร็จเสมอ, บันทึกทุก action ลง `TaskLog`
-- **Phase 5**: `SchedulerService` ใช้ node-cron รันทุก `SCHEDULER_INTERVAL_MIN` นาที เช็ค `NotificationSchedule` ที่ถึงเวลาส่ง (`ASSIGNED_ALERT`, `BEFORE_DEADLINE`, `CLAIMED_BROADCAST`) และ generate `OVERDUE_REPEAT` ใหม่ตามรอบที่ตั้งไว้จนกว่างานจะเสร็จ
+- **Phase 5**: `SchedulerService` ใช้ node-cron รันทุก `SCHEDULER_INTERVAL_MIN` นาที เช็ค `NotificationSchedule` ที่ถึงเวลาส่ง (`ASSIGNED_ALERT`, `BEFORE_DEADLINE` ตาม preference ต่อคน, `CLAIMED_BROADCAST`) และ generate `OVERDUE_REPEAT` ใหม่ตามรอบที่ตั้งไว้จนกว่างานจะเสร็จ (ข้ามคนที่ตั้งโหมด "ปิดแจ้งเตือน" ไว้)
 
 ## ยังไม่ทำ (ตาม roadmap เป็น Phase ถัดไป)
 

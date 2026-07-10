@@ -1,12 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
-export type ConversationStep =
-  | 'AWAIT_TITLE'
-  | 'AWAIT_DESCRIPTION'
-  | 'AWAIT_PRIORITY'
-  | 'AWAIT_DEADLINE'
-  | 'AWAIT_ASSIGN_MODE'
-  | 'AWAIT_ASSIGNEE';
+export type ConversationFlow = 'CREATE_TASK' | 'SET_REMINDER';
 
 export interface CreateTaskDraft {
   title?: string;
@@ -18,8 +12,9 @@ export interface CreateTaskDraft {
 }
 
 export interface ConversationState {
-  step: ConversationStep;
-  draft: CreateTaskDraft;
+  flow: ConversationFlow;
+  step: string;
+  data: Record<string, any>;
   updatedAt: number;
 }
 
@@ -27,6 +22,7 @@ const STATE_TTL_MS = 15 * 60 * 1000; // เลิกรอ input หลัง 15
 
 /**
  * เก็บ state การสนทนาแบบ in-memory ต่อ (groupId, userId)
+ * ใช้ร่วมกันได้หลาย flow (สร้างงาน / ตั้งค่าแจ้งเตือน) แยกด้วย field `flow`
  * เหมาะกับ instance เดียว (MVP) — ถ้า scale หลาย instance ค่อยย้ายไปเก็บใน DB/Redis
  */
 @Injectable()
@@ -37,8 +33,8 @@ export class ConversationService {
     return `${groupId}:${userId}`;
   }
 
-  start(groupId: string, userId: string) {
-    const state: ConversationState = { step: 'AWAIT_TITLE', draft: {}, updatedAt: Date.now() };
+  start(groupId: string, userId: string, flow: ConversationFlow, step: string, data: Record<string, any> = {}) {
+    const state: ConversationState = { flow, step, data, updatedAt: Date.now() };
     this.states.set(this.key(groupId, userId), state);
     return state;
   }
@@ -52,11 +48,11 @@ export class ConversationService {
     return state;
   }
 
-  update(groupId: string, userId: string, patch: Partial<ConversationState>) {
+  update(groupId: string, userId: string, patch: Partial<Pick<ConversationState, 'step' | 'data'>>) {
     const key = this.key(groupId, userId);
     const current = this.states.get(key);
     if (!current) return undefined;
-    const next = { ...current, ...patch, updatedAt: Date.now() };
+    const next: ConversationState = { ...current, ...patch, updatedAt: Date.now() };
     this.states.set(key, next);
     return next;
   }

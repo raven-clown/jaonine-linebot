@@ -16,10 +16,12 @@ model User {
   displayName  String
   createdAt    DateTime @default(now())
 
-  memberships   GroupMember[]
-  createdTasks  Task[]        @relation("CreatedTasks")
-  assignedTasks Task[]        @relation("AssignedTasks")
-  taskLogs      TaskLog[]
+  memberships          GroupMember[]
+  createdTasks         Task[]                 @relation("CreatedTasks")
+  assignedTasks        Task[]                 @relation("AssignedTasks")
+  taskLogs             TaskLog[]
+  notificationPref     NotificationPreference?
+  receivedNotifications NotificationSchedule[] @relation("NotificationRecipient")
 }
 
 model Group {
@@ -112,18 +114,42 @@ enum LogAction {
 }
 
 model NotificationSchedule {
-  id          String    @id @default(cuid())
-  taskId      String
-  type        NotifType
-  scheduledAt DateTime
-  sentAt      DateTime?
+  id              String    @id @default(cuid())
+  taskId          String
+  type            NotifType
+  scheduledAt     DateTime
+  sentAt          DateTime?
+  recipientUserId String?   // ผู้รับเฉพาะราย (null = broadcast เข้ากลุ่ม เช่น CLAIMED_BROADCAST)
 
-  task        Task      @relation(fields: [taskId], references: [id])
+  task        Task  @relation(fields: [taskId], references: [id])
+  recipient   User? @relation("NotificationRecipient", fields: [recipientUserId], references: [id])
+
+  @@index([scheduledAt])
+  @@index([sentAt])
+  @@index([recipientUserId])
 }
 
 enum NotifType {
   ASSIGNED_ALERT    // แจ้งทันทีที่ถูกมอบหมาย
-  BEFORE_DEADLINE   // เตือนล่วงหน้าก่อนถึง deadline
+  BEFORE_DEADLINE   // เตือนล่วงหน้าก่อนถึง deadline (หลายจุดตาม preference ของแต่ละคน)
   OVERDUE_REPEAT    // เตือนซ้ำเมื่อเลย deadline ยังไม่เสร็จ
   CLAIMED_BROADCAST // แจ้งกลุ่มว่างานถูก claim ไปแล้ว
+}
+
+/// การตั้งค่าการแจ้งเตือนเรื่องเดดไลน์ของผู้ใช้แต่ละคน (ตั้งเองได้ผ่านคำสั่ง "ตั้งแจ้งเตือน")
+model NotificationPreference {
+  id               String       @id @default(cuid())
+  userId           String       @unique
+  mode             ReminderMode @default(DEFAULT_SCHEDULE)
+  customOffsetsMin Int[]        @default([]) // ใช้เมื่อ mode = CUSTOM: นาทีก่อนเดดไลน์ที่จะเตือน (เรียงมาก->น้อย)
+  updatedAt        DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+enum ReminderMode {
+  DEFAULT_SCHEDULE // ใช้ตารางเตือนมาตรฐาน (1 เดือน, 15/12/9/7/5/3/1 วัน, 12/6/3/1 ชม. ก่อนเดดไลน์)
+  DEADLINE_ONLY    // เตือนแค่ตอนถึงเวลาเดดไลน์เท่านั้น ไม่มีเตือนล่วงหน้า
+  CUSTOM           // ใช้ customOffsetsMin ที่ผู้ใช้กำหนดเอง
+  OFF              // ปิดแจ้งเตือนเรื่องเดดไลน์ทั้งหมด (ก่อนและหลังหมดเวลา)
 }

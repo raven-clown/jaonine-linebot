@@ -96,8 +96,7 @@ export function formatDate(d: Date): string {
   return `${dd} ${tt} น.`;
 }
 
-/** Flex bubble แสดงรายละเอียดงาน 1 ชิ้น พร้อมปุ่ม action ตามสถานะ */
-export function taskCard(task: {
+export interface TaskCardData {
   id: string;
   title: string;
   description?: string | null;
@@ -107,7 +106,10 @@ export function taskCard(task: {
   assignmentMode: string;
   assignedToName?: string | null;
   creatorName: string;
-}): FlexMessage {
+}
+
+/** สร้าง bubble เดียว (ใช้ร่วมกันทั้งการ์ดเดี่ยวและ carousel) พร้อมปุ่ม action ตามสถานะ */
+function taskBubble(task: TaskCardData): any {
   const buttons: any[] = [];
   if (task.status === 'OPEN' && task.assignmentMode === 'OPEN_CLAIM') {
     buttons.push({
@@ -141,53 +143,61 @@ export function taskCard(task: {
   }
 
   return {
-    type: 'flex',
-    altText: `งาน: ${task.title}`,
-    contents: {
-      type: 'bubble',
-      body: {
-        type: 'box',
-        layout: 'vertical',
-        spacing: 'sm',
-        contents: [
-          { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true },
-          { type: 'text', text: statusLabel(task.status), size: 'sm', color: '#888888' },
-          { type: 'separator', margin: 'md' },
-          ...(task.description
-            ? [{ type: 'text', text: task.description, size: 'sm', wrap: true, margin: 'md' } as any]
-            : []),
-          { type: 'text', text: `ความสำคัญ: ${priorityLabel(task.priority)}`, size: 'sm', margin: 'md' },
-          {
-            type: 'text',
-            text: task.deadline ? `เส้นตาย: ${formatDate(task.deadline)}` : 'เส้นตาย: ไม่มี',
-            size: 'sm',
-          },
-          {
-            type: 'text',
-            text: `ผู้รับผิดชอบ: ${task.assignedToName ?? '(ยังไม่มี)'}`,
-            size: 'sm',
-          },
-          { type: 'text', text: `สร้างโดย: ${task.creatorName}`, size: 'xs', color: '#aaaaaa' },
-        ],
-      },
-      ...(buttons.length
-        ? { footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: buttons } }
-        : {}),
+    type: 'bubble',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: [
+        { type: 'text', text: task.title, weight: 'bold', size: 'md', wrap: true },
+        { type: 'text', text: statusLabel(task.status), size: 'sm', color: '#888888' },
+        { type: 'separator', margin: 'md' },
+        ...(task.description
+          ? [{ type: 'text', text: task.description, size: 'sm', wrap: true, margin: 'md' } as any]
+          : []),
+        { type: 'text', text: `ความสำคัญ: ${priorityLabel(task.priority)}`, size: 'sm', margin: 'md' },
+        {
+          type: 'text',
+          text: task.deadline ? `เส้นตาย: ${formatDate(task.deadline)}` : 'เส้นตาย: ไม่มี',
+          size: 'sm',
+        },
+        {
+          type: 'text',
+          text: `ผู้รับผิดชอบ: ${task.assignedToName ?? '(ยังไม่มี)'}`,
+          size: 'sm',
+        },
+        { type: 'text', text: `สร้างโดย: ${task.creatorName}`, size: 'xs', color: '#aaaaaa' },
+      ],
     },
+    ...(buttons.length
+      ? { footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: buttons } }
+      : {}),
   };
 }
 
-export function taskListMessage(tasks: any[]): Message {
+/** Flex message การ์ดงานเดี่ยว พร้อมปุ่ม action ตามสถานะ */
+export function taskCard(task: TaskCardData): FlexMessage {
+  return {
+    type: 'flex',
+    altText: `งาน: ${task.title}`,
+    contents: taskBubble(task),
+  };
+}
+
+/** Flex carousel แสดงงานหลายชิ้นพร้อมปุ่มกดได้ในตัว (แทนที่ list แบบข้อความล้วน) */
+export function taskListMessage(tasks: TaskCardData[]): Message {
   if (tasks.length === 0) {
     return textMessage(`ยังไม่มีงานในกลุ่มนี้ครับ พิมพ์ "สร้างงาน" เพื่อเริ่มเลย`);
   }
-  const lines = tasks
-    .slice(0, 20)
-    .map(
-      (t, i) =>
-        `${i + 1}. [${statusLabel(t.status)}] ${t.title}${t.assignedToName ? ' — ' + t.assignedToName : ''}`,
-    );
-  return textMessage(`📋 รายการงานในกลุ่ม (${tasks.length}):\n${lines.join('\n')}`);
+  const shown = tasks.slice(0, 10); // LINE carousel จำกัดสูงสุด 12 bubble ต่อข้อความ
+  return {
+    type: 'flex',
+    altText: `📋 รายการงานในกลุ่ม (${tasks.length})`,
+    contents: {
+      type: 'carousel',
+      contents: shown.map((t) => taskBubble(t)),
+    },
+  };
 }
 
 export function helpMessage(): Message {
@@ -195,7 +205,60 @@ export function helpMessage(): Message {
     `${BOT_NAME} — คำสั่งที่ใช้ได้:\n` +
       '• "สร้างงาน" — เริ่มสร้างงานใหม่\n' +
       '• "งาน" หรือ "list" — ดูรายการงานในกลุ่ม\n' +
+      '• "ตั้งแจ้งเตือน" — ตั้งค่าการแจ้งเตือนเดดไลน์ของตัวเอง\n' +
       '• "ยกเลิก" — ยกเลิกขั้นตอนที่กำลังทำอยู่\n' +
       '• กดปุ่มใต้การ์ดงานเพื่อ รับ/เสร็จ/ถอนงาน',
   );
+}
+
+export function askReminderMode(): Message {
+  return textMessage(
+    'ตั้งค่าการแจ้งเตือนเดดไลน์ของคุณ — อยากให้เตือนแบบไหน?',
+    qr([
+      { label: '🔔 มาตรฐาน', data: 'remindmode:DEFAULT_SCHEDULE' },
+      { label: '⏱️ แจ้งตอนหมดเวลาอย่างเดียว', data: 'remindmode:DEADLINE_ONLY' },
+      { label: '🛠️ กำหนดเอง', data: 'remindmode:CUSTOM' },
+      { label: '🔕 ปิดแจ้งเตือน', data: 'remindmode:OFF' },
+    ]),
+  );
+}
+
+export function askCustomOffsets(): Message {
+  return textMessage(
+    'พิมพ์ระยะเวลาที่อยากให้เตือนก่อนถึงเดดไลน์ คั่นด้วยช่องว่าง (mo=เดือน, d=วัน, h=ชม.)\n' +
+      'เช่น: 1mo 15d 7d 3d 1d 12h 6h 1h\n' +
+      'พิมพ์ "ยกเลิก" เพื่อไม่ตั้งค่านี้',
+  );
+}
+
+export function reminderSetConfirmation(mode: string, offsetsMin: number[]): Message {
+  const modeText = modeLabelLocal(mode);
+  if (mode === 'OFF') {
+    return textMessage(`🔕 ปิดแจ้งเตือนเดดไลน์เรียบร้อยแล้วครับ (ยังได้รับแจ้งตอนได้รับมอบหมายงานตามปกติ)`);
+  }
+  const list = offsetsMin.length ? offsetsMin.map((m) => `• ${offsetLabelLocal(m)}`).join('\n') : '';
+  return textMessage(`✅ ตั้งค่าแจ้งเตือนเป็น: ${modeText}${list ? `\n${list}` : ''}`);
+}
+
+function modeLabelLocal(mode: string): string {
+  return (
+    {
+      DEFAULT_SCHEDULE: 'มาตรฐาน',
+      DEADLINE_ONLY: 'แจ้งตอนหมดเวลาอย่างเดียว',
+      CUSTOM: 'กำหนดเอง',
+      OFF: 'ปิดแจ้งเตือน',
+    }[mode] ?? mode
+  );
+}
+
+function offsetLabelLocal(min: number): string {
+  if (min <= 0) return 'ถึงเวลาเดดไลน์';
+  const days = Math.floor(min / 1440);
+  const hours = Math.floor((min % 1440) / 60);
+  const mins = min % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} วัน`);
+  if (hours > 0) parts.push(`${hours} ชม.`);
+  if (mins > 0 && days === 0) parts.push(`${mins} นาที`);
+  return (parts.join(' ') || `${min} นาที`) + 'ก่อนเดดไลน์';
 }

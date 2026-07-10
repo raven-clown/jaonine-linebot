@@ -4,7 +4,9 @@ import * as cron from 'node-cron';
 import { NotifType, TaskStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LineService } from '../line/line.service';
+import { NotificationPreferenceService } from './notification-preference.service';
 import { formatDate, priorityLabel } from '../line/flex-builder';
+import { formatOffset } from './reminder-schedule.util';
 
 /**
  * Scheduler (node-cron) — รันทุก N นาทีตาม SCHEDULER_INTERVAL_MIN
@@ -20,6 +22,7 @@ export class SchedulerService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly line: LineService,
+    private readonly preferences: NotificationPreferenceService,
     config: ConfigService,
   ) {
     this.overdueRepeatMin = Number(config.get('NOTIFY_OVERDUE_REPEAT_MIN') ?? 180);
@@ -64,6 +67,7 @@ export class SchedulerService implements OnModuleInit {
     const due = await this.prisma.notificationSchedule.findMany({
       where: { sentAt: null, scheduledAt: { lte: new Date() } },
       include: {
+        recipient: true,
         task: { include: { assignedTo: true, creator: true, group: true } },
       },
       take: 50,
@@ -71,7 +75,7 @@ export class SchedulerService implements OnModuleInit {
 
     for (const notif of due) {
       try {
-        await this.send(notif.type, notif.task);
+        await this.send(notif, notif.task);
       } catch (err) {
         this.logger.error(`send notif ${notif.id} failed: ${err?.message ?? err}`);
       } finally {
@@ -83,11 +87,11 @@ export class SchedulerService implements OnModuleInit {
     }
   }
 
-  private async send(type: NotifType, task: any) {
+  private async send(notif: any, task: any) {
     const groupLineId = task.group?.lineGroupId;
     const assigneeLineId = task.assignedTo?.lineUserId;
 
-    switch (type) {
+    switch (notif.type as NotifType) {
       case NotifType.ASSIGNED_ALERT: {
         if (assigneeLineId) {
           await this.line.push(
@@ -98,24 +102,34 @@ export class SchedulerService implements OnModuleInit {
         break;
       }
       case NotifType.BEFORE_DEADLINE: {
-        const target = assigneeLineId ?? groupLineId;
-        if (target) {
-          await this.line.push(
-            target,
-            textMsg(
-              `⏰ ใกล้ถึงเส้นตายแล้ว: "${task.title}"\nเส้นตาย: ${task.deadline ? formatDate(task.deadline) : '-'}`,
-            ),
-          );
-        }
+        const target = notif.recipient?.lineUserId ?? assigneeLineId ?? groupLineId;
+        if (!target || !task.deadline) break;
+
+        const offsetMin = Math.max(
+          0,
+          Math.round((new Date(task.deadline).getTime() - new Date(notif.scheduledAt).getTime()) / 60000),
+        );
+        const text =
+          offsetMin <= 0
+            ? `⏰ ถึงเวลาเดดไลน์แล้ว: "${task.title}" (เส้นตาย ${formatDate(task.deadline)})`
+            : `⏰ อีก${formatOffset(offsetMin)}จะถึงเดดไลน์: "${task.title}" (เส้นตาย ${formatDate(task.deadline)})`;
+        await this.line.push(target, textMsg(text));
         break;
       }
       case NotifType.OVERDUE_REPEAT: {
-        const messages = [
-          `🚨 งานเลยกำหนดแล้ว: "${task.title}" (เส้นตาย ${task.deadline ? formatDate(task.deadline) : '-'})`,
-        ];
-        if (assigneeLineId) await this.line.push(assigneeLineId, textMsg(messages[0]));
+        const message = `🚨 งานเลยกำหนดแล้ว: "${task.title}" (เส้นตาย ${task.deadline ? formatDate(task.deadline) : '-'})`;
+
+        if (assigneeLineId) {
+          const pref = await this.preferences.getPreference(task.assignedTo.id);
+          if (pref.mode !== 'OFF') {
+            await this.line.push(assigneeLineId, textMsg(message));
+          }
+        }
         if (task.creator?.lineUserId && task.creator.lineUserId !== assigneeLineId) {
-          await this.line.push(task.creator.lineUserId, textMsg(`${messages[0]}\n(แจ้งเพราะคุณเป็นผู้สร้างงานนี้)`));
+          const creatorPref = await this.preferences.getPreference(task.creator.id);
+          if (creatorPref.mode !== 'OFF') {
+            await this.line.push(task.creator.lineUserId, textMsg(`${message}\n(แจ้งเพราะคุณเป็นผู้สร้างงานนี้)`));
+          }
         }
         break;
       }

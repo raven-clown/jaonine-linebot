@@ -1,5 +1,4 @@
 import { Injectable, BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { AssignmentMode, LogAction, Priority, TaskStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -7,15 +6,10 @@ import { CreateTaskDraft } from '../conversation/conversation.service';
 
 @Injectable()
 export class TasksService {
-  private readonly notifyBeforeDeadlineMin: number;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
-    config: ConfigService,
-  ) {
-    this.notifyBeforeDeadlineMin = Number(config.get('NOTIFY_BEFORE_DEADLINE_MIN') ?? 60);
-  }
+  ) {}
 
   private taskInclude = {
     creator: true,
@@ -79,10 +73,9 @@ export class TasksService {
     }
 
     if (task.deadline) {
-      const notifyAt = new Date(task.deadline.getTime() - this.notifyBeforeDeadlineMin * 60 * 1000);
-      if (notifyAt.getTime() > Date.now()) {
-        await this.notifications.schedule(task.id, 'BEFORE_DEADLINE', notifyAt);
-      }
+      // ตั้งเตือนล่วงหน้าตาม preference ของผู้รับผิดชอบ (ถ้ายังไม่มีคนรับ ใช้ preference ของผู้สร้างไปก่อน)
+      const recipientId = assignedToId ?? creatorId;
+      await this.notifications.scheduleDeadlineReminders(task.id, task.deadline, recipientId);
     }
 
     return task;
@@ -94,7 +87,7 @@ export class TasksService {
       include: this.taskInclude,
       orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
     });
-    return tasks.map((t) => ({ ...t, assignedToName: t.assignedTo?.displayName }));
+    return tasks.map((t) => ({ ...t, assignedToName: t.assignedTo?.displayName, creatorName: t.creator.displayName }));
   }
 
   async getTask(taskId: string) {
@@ -130,6 +123,11 @@ export class TasksService {
     });
     await this.notifications.scheduleNow(taskId, 'CLAIMED_BROADCAST');
 
+    // ตั้งเตือนล่วงหน้าให้คนที่เพิ่งรับงานไป ตาม preference ของเขาเอง
+    if (task.deadline) {
+      await this.notifications.scheduleDeadlineReminders(taskId, task.deadline, userId);
+    }
+
     return this.getTask(taskId);
   }
 
@@ -154,6 +152,11 @@ export class TasksService {
       },
     });
 
+    // คนที่ถูกถอนออกไม่ต้องได้รับเตือนล่วงหน้าของงานนี้อีก
+    if (task.assignedToId) {
+      await this.notifications.cancelPendingDeadlineReminders(taskId, task.assignedToId);
+    }
+
     return this.getTask(taskId);
   }
 
@@ -166,6 +169,7 @@ export class TasksService {
     await this.prisma.taskLog.create({
       data: { taskId, actorId: userId, action: LogAction.COMPLETED },
     });
+    await this.notifications.cancelPendingDeadlineReminders(taskId);
     return this.getTask(taskId);
   }
 
@@ -178,6 +182,7 @@ export class TasksService {
     await this.prisma.taskLog.create({
       data: { taskId, actorId: userId, action: LogAction.CANCELLED },
     });
+    await this.notifications.cancelPendingDeadlineReminders(taskId);
     return this.getTask(taskId);
   }
 }

@@ -1,13 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { WebhookEvent } from '@line/bot-sdk';
+import { ReminderMode } from '@prisma/client';
 import { LineService } from '../line/line.service';
 import { UsersService } from '../users/users.service';
 import { TasksService } from '../tasks/tasks.service';
-import { ConversationService } from '../conversation/conversation.service';
+import { ConversationService, ConversationState } from '../conversation/conversation.service';
+import { NotificationPreferenceService } from '../notifications/notification-preference.service';
+import { parseCustomOffsets } from '../notifications/reminder-schedule.util';
 import * as fx from '../line/flex-builder';
 
 const CREATE_KEYWORDS = ['สร้างงาน', 'สร้าง task', 'create task', 'newtask'];
 const LIST_KEYWORDS = ['งาน', 'list', 'รายการงาน', 'ดูงาน'];
+const REMINDER_KEYWORDS = ['ตั้งแจ้งเตือน', 'แจ้งเตือน', 'reminder', 'notify'];
 const CANCEL_KEYWORDS = ['ยกเลิก', 'cancel'];
 const HELP_KEYWORDS = ['help', 'ช่วยเหลือ', 'คำสั่ง'];
 const SKIP_KEYWORDS = ['ข้าม', 'skip'];
@@ -21,6 +25,7 @@ export class CommandRouterService {
     private readonly users: UsersService,
     private readonly tasks: TasksService,
     private readonly conversation: ConversationService,
+    private readonly preferences: NotificationPreferenceService,
   ) {}
 
   async handle(event: WebhookEvent) {
@@ -67,13 +72,17 @@ export class CommandRouterService {
       return;
     }
 
-    if (state) {
-      await this.continueConversation(state, text, replyToken, userId, groupId);
+    if (state?.flow === 'CREATE_TASK') {
+      await this.continueCreateTask(state, text, replyToken, userId, groupId);
+      return;
+    }
+    if (state?.flow === 'SET_REMINDER') {
+      await this.continueSetReminder(state, text, replyToken, userId, groupId);
       return;
     }
 
     if (CREATE_KEYWORDS.some((k) => text.toLowerCase().includes(k.toLowerCase()))) {
-      this.conversation.start(groupId, userId);
+      this.conversation.start(groupId, userId, 'CREATE_TASK', 'AWAIT_TITLE');
       await this.line.reply(replyToken, fx.askTitle());
       return;
     }
@@ -81,6 +90,12 @@ export class CommandRouterService {
     if (LIST_KEYWORDS.some((k) => text.toLowerCase() === k.toLowerCase())) {
       const tasks = await this.tasks.listTasks(groupId);
       await this.line.reply(replyToken, fx.taskListMessage(tasks));
+      return;
+    }
+
+    if (REMINDER_KEYWORDS.some((k) => text.toLowerCase() === k.toLowerCase())) {
+      this.conversation.start(groupId, userId, 'SET_REMINDER', 'AWAIT_MODE');
+      await this.line.reply(replyToken, fx.askReminderMode());
       return;
     }
 
@@ -92,24 +107,22 @@ export class CommandRouterService {
     // ข้อความอื่นๆ ที่ไม่ตรงคำสั่งใด ๆ และไม่มี state ค้าง -> เงียบไว้ ไม่ตอบกวนแชทกลุ่ม
   }
 
-  private async continueConversation(
-    state: ReturnType<ConversationService['get']>,
+  private async continueCreateTask(
+    state: ConversationState,
     text: string,
     replyToken: string,
     userId: string,
     groupId: string,
   ) {
-    if (!state) return;
-
     switch (state.step) {
       case 'AWAIT_TITLE': {
-        this.conversation.update(groupId, userId, { draft: { ...state.draft, title: text }, step: 'AWAIT_DESCRIPTION' });
+        this.conversation.update(groupId, userId, { data: { ...state.data, title: text }, step: 'AWAIT_DESCRIPTION' });
         await this.line.reply(replyToken, fx.askDescription(text));
         return;
       }
       case 'AWAIT_DESCRIPTION': {
         const description = SKIP_KEYWORDS.includes(text.toLowerCase()) ? null : text;
-        this.conversation.update(groupId, userId, { draft: { ...state.draft, description }, step: 'AWAIT_PRIORITY' });
+        this.conversation.update(groupId, userId, { data: { ...state.data, description }, step: 'AWAIT_PRIORITY' });
         await this.line.reply(replyToken, fx.askPriority());
         return;
       }
@@ -122,7 +135,7 @@ export class CommandRouterService {
           );
           return;
         }
-        this.conversation.update(groupId, userId, { draft: { ...state.draft, deadline: parsed }, step: 'AWAIT_ASSIGN_MODE' });
+        this.conversation.update(groupId, userId, { data: { ...state.data, deadline: parsed }, step: 'AWAIT_ASSIGN_MODE' });
         await this.line.reply(replyToken, fx.askAssignmentMode());
         return;
       }
@@ -130,6 +143,32 @@ export class CommandRouterService {
         // ขั้นตอนอื่นรอ postback อย่างเดียว เตือนผู้ใช้
         await this.line.reply(replyToken, fx.textMessage('กรุณากดปุ่มตัวเลือกด้านบนครับ หรือพิมพ์ "ยกเลิก" เพื่อเริ่มใหม่'));
     }
+  }
+
+  private async continueSetReminder(
+    state: ConversationState,
+    text: string,
+    replyToken: string,
+    userId: string,
+    groupId: string,
+  ) {
+    if (state.step !== 'AWAIT_CUSTOM_OFFSETS') {
+      await this.line.reply(replyToken, fx.textMessage('กรุณากดปุ่มตัวเลือกด้านบนครับ หรือพิมพ์ "ยกเลิก" เพื่อเริ่มใหม่'));
+      return;
+    }
+
+    const offsets = parseCustomOffsets(text);
+    if (!offsets) {
+      await this.line.reply(
+        replyToken,
+        fx.textMessage('รูปแบบไม่ถูกต้องครับ ลองพิมพ์แบบ "1mo 15d 7d 3d 1d 12h 6h 1h" หรือพิมพ์ "ยกเลิก"'),
+      );
+      return;
+    }
+
+    await this.preferences.setCustomOffsets(userId, offsets);
+    this.conversation.clear(groupId, userId);
+    await this.line.reply(replyToken, fx.reminderSetConfirmation('CUSTOM', offsets));
   }
 
   private async handlePostback(event: WebhookEvent & { type: 'postback' }, userId: string, groupId: string) {
@@ -167,28 +206,47 @@ export class CommandRouterService {
       return;
     }
 
+    // เลือกโหมดแจ้งเตือน
+    if (action === 'remindmode') {
+      const state = this.conversation.get(groupId, userId);
+      if (!state || state.flow !== 'SET_REMINDER') {
+        await this.line.reply(replyToken, fx.textMessage('ขั้นตอนนี้หมดเวลาไปแล้วครับ พิมพ์ "ตั้งแจ้งเตือน" เพื่อเริ่มใหม่'));
+        return;
+      }
+      const mode = value as ReminderMode;
+      if (mode === 'CUSTOM') {
+        this.conversation.update(groupId, userId, { step: 'AWAIT_CUSTOM_OFFSETS' });
+        await this.line.reply(replyToken, fx.askCustomOffsets());
+        return;
+      }
+      await this.preferences.setMode(userId, mode);
+      this.conversation.clear(groupId, userId);
+      await this.line.reply(replyToken, fx.reminderSetConfirmation(mode, []));
+      return;
+    }
+
     // action ระหว่างขั้นตอนสร้างงาน
     const state = this.conversation.get(groupId, userId);
-    if (!state) {
+    if (!state || state.flow !== 'CREATE_TASK') {
       await this.line.reply(replyToken, fx.textMessage('ขั้นตอนนี้หมดเวลาไปแล้วครับ พิมพ์ "สร้างงาน" เพื่อเริ่มใหม่'));
       return;
     }
 
     if (action === 'priority' && state.step === 'AWAIT_PRIORITY') {
-      this.conversation.update(groupId, userId, { draft: { ...state.draft, priority: value as any }, step: 'AWAIT_DEADLINE' });
+      this.conversation.update(groupId, userId, { data: { ...state.data, priority: value }, step: 'AWAIT_DEADLINE' });
       await this.line.reply(replyToken, fx.askDeadline());
       return;
     }
 
     if (action === 'deadline' && value === 'skip' && state.step === 'AWAIT_DEADLINE') {
-      this.conversation.update(groupId, userId, { draft: { ...state.draft, deadline: null }, step: 'AWAIT_ASSIGN_MODE' });
+      this.conversation.update(groupId, userId, { data: { ...state.data, deadline: null }, step: 'AWAIT_ASSIGN_MODE' });
       await this.line.reply(replyToken, fx.askAssignmentMode());
       return;
     }
 
     if (action === 'assignmode' && state.step === 'AWAIT_ASSIGN_MODE') {
       if (value === 'OPEN_CLAIM') {
-        await this.finalizeTask(groupId, userId, { ...state.draft, assignmentMode: 'OPEN_CLAIM' }, replyToken);
+        await this.finalizeTask(groupId, userId, { ...state.data, assignmentMode: 'OPEN_CLAIM' }, replyToken);
         return;
       }
       const members = await this.users.listGroupMembers(groupId);
@@ -196,7 +254,7 @@ export class CommandRouterService {
         await this.line.reply(replyToken, fx.textMessage('ยังไม่มีสมาชิกอื่นในระบบครับ ลองให้เพื่อนทักบอทก่อนแล้วค่อยลองใหม่'));
         return;
       }
-      this.conversation.update(groupId, userId, { draft: { ...state.draft, assignmentMode: 'EXCLUSIVE' }, step: 'AWAIT_ASSIGNEE' });
+      this.conversation.update(groupId, userId, { data: { ...state.data, assignmentMode: 'EXCLUSIVE' }, step: 'AWAIT_ASSIGNEE' });
       await this.line.reply(replyToken, fx.askAssignee(members));
       return;
     }
@@ -205,7 +263,7 @@ export class CommandRouterService {
       await this.finalizeTask(
         groupId,
         userId,
-        { ...state.draft, assignmentMode: 'EXCLUSIVE', assignedToUserId: value },
+        { ...state.data, assignmentMode: 'EXCLUSIVE', assignedToUserId: value },
         replyToken,
       );
       return;
@@ -216,16 +274,20 @@ export class CommandRouterService {
     try {
       const task = await this.tasks.createTask(groupId, userId, draft);
       this.conversation.clear(groupId, userId);
-      await this.line.reply(
-        replyToken,
-        fx.taskCreatedSummary({
+      await this.line.reply(replyToken, [
+        fx.textMessage('✅ สร้างงานสำเร็จ! กดปุ่มด้านล่างการ์ดเพื่อจัดการงานนี้ได้เลยครับ'),
+        fx.taskCard({
+          id: task.id,
           title: task.title,
+          description: task.description,
           priority: task.priority,
+          status: task.status,
           deadline: task.deadline,
           assignmentMode: task.assignmentMode,
           assignedToName: (task as any).assignedTo?.displayName,
+          creatorName: (task as any).creator.displayName,
         }),
-      );
+      ]);
     } catch (err: any) {
       await this.line.reply(replyToken, fx.textMessage(`⚠️ สร้างงานไม่สำเร็จ: ${err?.message ?? 'unknown error'}`));
     }
