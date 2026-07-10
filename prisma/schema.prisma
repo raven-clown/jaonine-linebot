@@ -1,0 +1,129 @@
+// เจ้านาย (JaoNine) — LINE Task Bot
+// Schema ตาม docs/03-database-schema.md
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  lineUserId   String   @unique
+  displayName  String
+  createdAt    DateTime @default(now())
+
+  memberships   GroupMember[]
+  createdTasks  Task[]        @relation("CreatedTasks")
+  assignedTasks Task[]        @relation("AssignedTasks")
+  taskLogs      TaskLog[]
+}
+
+model Group {
+  id          String   @id @default(cuid())
+  lineGroupId String   @unique
+  name        String
+  createdAt   DateTime @default(now())
+
+  members     GroupMember[]
+  tasks       Task[]
+}
+
+model GroupMember {
+  id           String   @id @default(cuid())
+  groupId      String
+  userId       String
+  role         Role     @default(MEMBER)
+  maxOpenTasks Int      @default(3) // จำกัดจำนวนงานที่รับพร้อมกันได้
+  joinedAt     DateTime @default(now())
+
+  group        Group    @relation(fields: [groupId], references: [id])
+  user         User     @relation(fields: [userId], references: [id])
+
+  @@unique([groupId, userId])
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+model Task {
+  id             String         @id @default(cuid())
+  groupId        String
+  creatorId      String
+  title          String
+  description    String?
+  priority       Priority       @default(MEDIUM)
+  deadline       DateTime?
+  assignmentMode AssignmentMode
+  assignedToId   String?
+  status         TaskStatus     @default(OPEN)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  group          Group          @relation(fields: [groupId], references: [id])
+  creator        User           @relation("CreatedTasks", fields: [creatorId], references: [id])
+  assignedTo     User?          @relation("AssignedTasks", fields: [assignedToId], references: [id])
+  logs           TaskLog[]
+  notifications  NotificationSchedule[]
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum AssignmentMode {
+  EXCLUSIVE  // มอบให้คนเดียว คนอื่น claim ไม่ได้
+  OPEN_CLAIM // ใครก็ได้ในกลุ่มกดรับ คนแรกได้ไป
+}
+
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+model TaskLog {
+  id        String    @id @default(cuid())
+  taskId    String
+  actorId   String
+  action    LogAction
+  createdAt DateTime  @default(now())
+
+  task      Task      @relation(fields: [taskId], references: [id])
+  actor     User      @relation(fields: [actorId], references: [id])
+}
+
+enum LogAction {
+  CREATED
+  ASSIGNED
+  UNASSIGNED
+  CLAIMED
+  UNCLAIMED
+  COMPLETED
+  CANCELLED
+}
+
+model NotificationSchedule {
+  id          String    @id @default(cuid())
+  taskId      String
+  type        NotifType
+  scheduledAt DateTime
+  sentAt      DateTime?
+
+  task        Task      @relation(fields: [taskId], references: [id])
+}
+
+enum NotifType {
+  ASSIGNED_ALERT    // แจ้งทันทีที่ถูกมอบหมาย
+  BEFORE_DEADLINE   // เตือนล่วงหน้าก่อนถึง deadline
+  OVERDUE_REPEAT    // เตือนซ้ำเมื่อเลย deadline ยังไม่เสร็จ
+  CLAIMED_BROADCAST // แจ้งกลุ่มว่างานถูก claim ไปแล้ว
+}
