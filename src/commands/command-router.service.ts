@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { WebhookEvent } from '@line/bot-sdk';
-import { ReminderMode } from '@prisma/client';
+import { ReminderMode, TaskStatus } from '@prisma/client';
 import { LineService } from '../line/line.service';
-import { UsersService } from '../users/users.service';
+import { UsersService, personalSpaceId, isPersonalSpace } from '../users/users.service';
 import { TasksService } from '../tasks/tasks.service';
 import { ConversationService, ConversationState } from '../conversation/conversation.service';
 import { NotificationPreferenceService } from '../notifications/notification-preference.service';
@@ -11,6 +12,10 @@ import * as fx from '../line/flex-builder';
 
 const CREATE_KEYWORDS = ['สร้างงาน', 'สร้าง task', 'create task', 'newtask'];
 const LIST_KEYWORDS = ['งาน', 'list', 'รายการงาน', 'ดูงาน'];
+const MY_TASKS_KEYWORDS = ['งานของฉัน', 'งานฉัน', 'my tasks', 'mytasks'];
+const HISTORY_KEYWORDS = ['ประวัติงาน', 'ประวัติ', 'history'];
+const PLAN_KEYWORDS = ['แพลนของฉัน', 'แพลน', 'plan'];
+const NAMED_TASKS_PREFIX = 'งานของ';
 const REMINDER_KEYWORDS = ['ตั้งแจ้งเตือน', 'แจ้งเตือน', 'reminder', 'notify'];
 const CANCEL_KEYWORDS = ['ยกเลิก', 'cancel'];
 const HELP_KEYWORDS = ['help', 'ช่วยเหลือ', 'คำสั่ง'];
@@ -26,6 +31,7 @@ export class CommandRouterService {
     private readonly tasks: TasksService,
     private readonly conversation: ConversationService,
     private readonly preferences: NotificationPreferenceService,
+    private readonly config: ConfigService,
   ) {}
 
   async handle(event: WebhookEvent) {
@@ -33,13 +39,20 @@ export class CommandRouterService {
     const lineUserId = 'userId' in source ? source.userId : undefined;
     if (!lineUserId) return; // ต้องรู้ตัวผู้ส่งเสมอ
 
-    const lineGroupId = source.type === 'group' ? source.groupId : undefined;
+    let lineGroupId: string | undefined;
+    if (source.type === 'group') {
+      lineGroupId = source.groupId;
+    } else if (source.type === 'user') {
+      // แชทส่วนตัว 1-ต่อ-1 กับบอท -> ใช้ "พื้นที่ส่วนตัว" (personal space) แทนกลุ่ม สร้าง/จัดการงานของตัวเองได้เลย
+      lineGroupId = personalSpaceId(lineUserId);
+    }
 
     if (!lineGroupId) {
+      // ห้องแชทแบบ multi-person (room) ที่ไม่ใช่ group อย่างเป็นทางการ — ยังไม่รองรับ
       if (event.type === 'message' && event.message.type === 'text') {
         await this.line.reply(
           event.replyToken,
-          fx.textMessage(`${fx.BOT_NAME} ใช้งานในแชทกลุ่มครับ ลองชวนบอทเข้ากลุ่มแล้วพิมพ์คุยกันได้เลย`),
+          fx.textMessage(`${fx.BOT_NAME} ยังไม่รองรับแชทประเภทนี้ครับ ลองใช้ในแชทกลุ่ม หรือทักคุยส่วนตัวกับบอทแทนได้ครับ`),
         );
       }
       return;
@@ -48,8 +61,10 @@ export class CommandRouterService {
     const { user, group } = await this.users.ensureUserAndGroup(lineUserId, lineGroupId);
     if (!group) return;
 
+    const isPersonal = isPersonalSpace(lineGroupId);
+
     if (event.type === 'message' && event.message.type === 'text') {
-      await this.handleText(event, user.id, group.id);
+      await this.handleText(event, user.id, group.id, isPersonal);
       return;
     }
 
@@ -59,7 +74,12 @@ export class CommandRouterService {
     }
   }
 
-  private async handleText(event: WebhookEvent & { type: 'message' }, userId: string, groupId: string) {
+  private async handleText(
+    event: WebhookEvent & { type: 'message' },
+    userId: string,
+    groupId: string,
+    isPersonal: boolean,
+  ) {
     if (event.type !== 'message' || event.message.type !== 'text') return;
     const text = event.message.text.trim();
     const replyToken = event.replyToken;
@@ -82,14 +102,86 @@ export class CommandRouterService {
     }
 
     if (CREATE_KEYWORDS.some((k) => text.toLowerCase().includes(k.toLowerCase()))) {
-      this.conversation.start(groupId, userId, 'CREATE_TASK', 'AWAIT_TITLE');
-      await this.line.reply(replyToken, fx.askTitle());
+      const liffId = this.config.get<string>('LIFF_ID');
+      if (liffId) {
+        await this.line.reply(replyToken, fx.openCreateTaskFormMessage(liffId));
+      } else {
+        // ยังไม่ได้ตั้งค่า LIFF_ID บนเซิร์ฟเวอร์ -> ใช้ flow พิมพ์ทีละขั้นตอนแบบเดิมแทน
+        this.conversation.start(groupId, userId, 'CREATE_TASK', 'AWAIT_TITLE', { isPersonal });
+        await this.line.reply(replyToken, fx.askTitle());
+      }
       return;
     }
 
     if (LIST_KEYWORDS.some((k) => text.toLowerCase() === k.toLowerCase())) {
       const tasks = await this.tasks.listTasks(groupId);
       await this.line.reply(replyToken, fx.taskListMessage(tasks));
+      return;
+    }
+
+    if (MY_TASKS_KEYWORDS.some((k) => text.toLowerCase() === k.toLowerCase())) {
+      const tasks = await this.tasks.listTasks(groupId, { assignedToId: userId });
+      await this.line.reply(
+        replyToken,
+        fx.taskListMessage(tasks, {
+          emptyText: 'ยังไม่มีงานที่คุณรับผิดชอบอยู่ครับ',
+          altText: `📋 งานของฉัน (${tasks.length})`,
+        }),
+      );
+      return;
+    }
+
+    if (HISTORY_KEYWORDS.some((k) => text.toLowerCase() === k.toLowerCase())) {
+      const tasks = await this.tasks.listTasks(groupId, {
+        statuses: [TaskStatus.DONE, TaskStatus.CANCELLED],
+        orderBy: 'latest',
+        take: 20,
+      });
+      await this.line.reply(
+        replyToken,
+        fx.taskListMessage(tasks, {
+          emptyText: 'ยังไม่มีประวัติงานที่เสร็จหรือยกเลิกไปแล้วครับ',
+          altText: `🗂️ ประวัติงาน (${tasks.length})`,
+        }),
+      );
+      return;
+    }
+
+    if (PLAN_KEYWORDS.some((k) => text.toLowerCase() === k.toLowerCase())) {
+      const info = await this.tasks.getPlanInfo(groupId, userId);
+      await this.line.reply(replyToken, fx.planInfoMessage(info.plan, info.limit, info.current));
+      return;
+    }
+
+    if (
+      text.toLowerCase().startsWith(NAMED_TASKS_PREFIX.toLowerCase()) &&
+      !MY_TASKS_KEYWORDS.includes(text.toLowerCase())
+    ) {
+      const name = text.slice(NAMED_TASKS_PREFIX.length).trim();
+      if (!name) {
+        await this.line.reply(replyToken, fx.textMessage('พิมพ์ชื่อคนที่อยากดูงานด้วยครับ เช่น "งานของแนน"'));
+        return;
+      }
+      const member = await this.users.findMemberByName(groupId, name);
+      if (member === null) {
+        await this.line.reply(replyToken, fx.textMessage(`ไม่พบสมาชิกชื่อ "${name}" ในกลุ่มนี้ครับ`));
+        return;
+      }
+      if (member === 'ambiguous') {
+        await this.line.reply(
+          replyToken,
+          fx.textMessage(`เจอหลายคนที่ชื่อคล้าย "${name}" ครับ ลองพิมพ์ชื่อให้ตรงขึ้นอีกหน่อย`),
+        );
+        return;
+      }
+      const tasks = await this.tasks.listTasks(groupId, { assignedToId: member.id });
+      await this.line.reply(
+        replyToken,
+        fx.taskListMessage(tasks, {
+          emptyText: `${member.displayName} ยังไม่มีงานที่รับผิดชอบอยู่ครับ`,
+          altText: `📋 งานของ${member.displayName} (${tasks.length})`,
+        }),
+      );
       return;
     }
 
@@ -135,14 +227,34 @@ export class CommandRouterService {
           );
           return;
         }
-        this.conversation.update(groupId, userId, { data: { ...state.data, deadline: parsed }, step: 'AWAIT_ASSIGN_MODE' });
-        await this.line.reply(replyToken, fx.askAssignmentMode());
+        await this.afterDeadlineSet(state, parsed, replyToken, userId, groupId);
         return;
       }
       default:
         // ขั้นตอนอื่นรอ postback อย่างเดียว เตือนผู้ใช้
         await this.line.reply(replyToken, fx.textMessage('กรุณากดปุ่มตัวเลือกด้านบนครับ หรือพิมพ์ "ยกเลิก" เพื่อเริ่มใหม่'));
     }
+  }
+
+  /** หลังตั้ง/ข้ามเส้นตายแล้ว: งานส่วนตัวมอบให้ตัวเองอัตโนมัติ ข้ามขั้นตอนเลือกผู้รับผิดชอบไปเลย */
+  private async afterDeadlineSet(
+    state: ConversationState,
+    deadline: Date | null,
+    replyToken: string,
+    userId: string,
+    groupId: string,
+  ) {
+    if (state.data.isPersonal) {
+      await this.finalizeTask(
+        groupId,
+        userId,
+        { ...state.data, deadline, assignmentMode: 'EXCLUSIVE', assignedToUserId: userId },
+        replyToken,
+      );
+      return;
+    }
+    this.conversation.update(groupId, userId, { data: { ...state.data, deadline }, step: 'AWAIT_ASSIGN_MODE' });
+    await this.line.reply(replyToken, fx.askAssignmentMode());
   }
 
   private async continueSetReminder(
@@ -176,6 +288,17 @@ export class CommandRouterService {
     const data = event.postback.data;
     const replyToken = event.replyToken;
     const [action, value] = data.split(':');
+
+    // ลบงานถาวร — ใช้ได้เฉพาะงานที่เสร็จ/ยกเลิกแล้ว และเฉพาะผู้สร้างงาน (เช็คในเซอร์วิส)
+    if (action === 'delete') {
+      try {
+        const deleted = await this.tasks.deleteTask(value, userId);
+        await this.line.reply(replyToken, fx.textMessage(`🗑️ ลบงาน "${deleted.title}" เรียบร้อยแล้วครับ`));
+      } catch (err: any) {
+        await this.line.reply(replyToken, fx.textMessage(`⚠️ ${err?.message ?? 'ลบงานไม่สำเร็จ'}`));
+      }
+      return;
+    }
 
     // action บนงานที่มีอยู่แล้ว: claim / complete / unassign / cancel
     if (action === 'claim' || action === 'complete' || action === 'unassign' || action === 'cancel') {
@@ -239,8 +362,7 @@ export class CommandRouterService {
     }
 
     if (action === 'deadline' && value === 'skip' && state.step === 'AWAIT_DEADLINE') {
-      this.conversation.update(groupId, userId, { data: { ...state.data, deadline: null }, step: 'AWAIT_ASSIGN_MODE' });
-      await this.line.reply(replyToken, fx.askAssignmentMode());
+      await this.afterDeadlineSet(state, null, replyToken, userId, groupId);
       return;
     }
 

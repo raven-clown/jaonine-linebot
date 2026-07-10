@@ -3,6 +3,7 @@ import { AssignmentMode, LogAction, Priority, TaskStatus } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateTaskDraft } from '../conversation/conversation.service';
+import { planLimit } from './plan.util';
 
 @Injectable()
 export class TasksService {
@@ -26,15 +27,33 @@ export class TasksService {
     });
   }
 
+  /** ลิมิตงานค้างสูงสุด = ค่า override ต่อกลุ่ม (ถ้ามี) ไม่งั้นอิงตาม Plan ของผู้ใช้ */
+  private async effectiveLimitFor(groupId: string, userId: string): Promise<number> {
+    const [membership, user] = await Promise.all([
+      this.prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId } } }),
+      this.prisma.user.findUnique({ where: { id: userId } }),
+    ]);
+    return membership?.maxOpenTasksOverride ?? planLimit(user?.plan ?? 'FREE');
+  }
+
   private async assertUnderLimit(groupId: string, userId: string) {
-    const membership = await this.prisma.groupMember.findUnique({
-      where: { groupId_userId: { groupId, userId } },
-    });
-    const limit = membership?.maxOpenTasks ?? 3;
+    const limit = await this.effectiveLimitFor(groupId, userId);
     const current = await this.countOpenTasksFor(groupId, userId);
     if (current >= limit) {
-      throw new BadRequestException(`รับงานไม่ได้ครับ ถึงลิมิตงานค้าง (${current}/${limit}) แล้ว`);
+      throw new BadRequestException(
+        `รับงานไม่ได้ครับ ถึงลิมิตงานค้าง (${current}/${limit}) แล้ว พิมพ์ "แพลนของฉัน" เพื่อดูรายละเอียด`,
+      );
     }
+  }
+
+  /** ข้อมูลแพลน + ลิมิต + จำนวนงานค้างปัจจุบัน ใช้กับคำสั่ง "แพลนของฉัน" */
+  async getPlanInfo(groupId: string, userId: string) {
+    const [user, limit, current] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId } }),
+      this.effectiveLimitFor(groupId, userId),
+      this.countOpenTasksFor(groupId, userId),
+    ]);
+    return { plan: user?.plan ?? 'FREE', limit, current };
   }
 
   async createTask(groupId: string, creatorId: string, draft: CreateTaskDraft) {
@@ -81,11 +100,27 @@ export class TasksService {
     return task;
   }
 
-  async listTasks(groupId: string, statuses: TaskStatus[] = [TaskStatus.OPEN, TaskStatus.IN_PROGRESS]) {
+  async listTasks(
+    groupId: string,
+    options: {
+      statuses?: TaskStatus[];
+      assignedToId?: string;
+      orderBy?: 'priority' | 'latest';
+      take?: number;
+    } = {},
+  ) {
+    const {
+      statuses = [TaskStatus.OPEN, TaskStatus.IN_PROGRESS],
+      assignedToId,
+      orderBy = 'priority',
+      take,
+    } = options;
+
     const tasks = await this.prisma.task.findMany({
-      where: { groupId, status: { in: statuses } },
+      where: { groupId, status: { in: statuses }, ...(assignedToId ? { assignedToId } : {}) },
       include: this.taskInclude,
-      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+      orderBy: orderBy === 'latest' ? [{ updatedAt: 'desc' }] : [{ priority: 'asc' }, { createdAt: 'asc' }],
+      ...(take ? { take } : {}),
     });
     return tasks.map((t) => ({ ...t, assignedToName: t.assignedTo?.displayName, creatorName: t.creator.displayName }));
   }
@@ -184,5 +219,19 @@ export class TasksService {
     });
     await this.notifications.cancelPendingDeadlineReminders(taskId);
     return this.getTask(taskId);
+  }
+
+  /** ลบงานถาวร — ลบได้เฉพาะงานที่ "เสร็จแล้ว" หรือ "ยกเลิกแล้ว" เท่านั้น (งานที่ยังทำอยู่ต้องกดยกเลิกก่อน)
+   *  TaskLog / NotificationSchedule ที่เกี่ยวข้องจะถูกลบตามไปด้วยอัตโนมัติ (onDelete: Cascade) */
+  async deleteTask(taskId: string, userId: string) {
+    const task = await this.getTask(taskId);
+    if (task.creatorId !== userId) {
+      throw new ForbiddenException('เฉพาะผู้สร้างงานเท่านั้นที่ลบงานนี้ได้');
+    }
+    if (task.status !== TaskStatus.DONE && task.status !== TaskStatus.CANCELLED) {
+      throw new BadRequestException('ลบได้เฉพาะงานที่เสร็จแล้วหรือยกเลิกแล้วเท่านั้น กดยกเลิกงานก่อนนะครับ');
+    }
+    await this.prisma.task.delete({ where: { id: taskId } });
+    return { id: taskId, title: task.title };
   }
 }

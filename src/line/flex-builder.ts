@@ -141,6 +141,15 @@ function taskBubble(task: TaskCardData): any {
       },
     });
   }
+  if (task.status === 'DONE' || task.status === 'CANCELLED') {
+    // ลบถาวรได้เฉพาะงานที่จบแล้ว (เสร็จ/ยกเลิก) — เซิร์ฟเวอร์เช็คสิทธิ์ผู้สร้างอีกชั้นตอนกดจริง
+    buttons.push({
+      type: 'button',
+      style: 'secondary',
+      color: '#FF5A5F',
+      action: { type: 'postback', label: '🗑️ ลบงานนี้', data: `delete:${task.id}`, displayText: `ลบงาน: ${task.title}` },
+    });
+  }
 
   return {
     type: 'bubble',
@@ -185,17 +194,75 @@ export function taskCard(task: TaskCardData): FlexMessage {
 }
 
 /** Flex carousel แสดงงานหลายชิ้นพร้อมปุ่มกดได้ในตัว (แทนที่ list แบบข้อความล้วน) */
-export function taskListMessage(tasks: TaskCardData[]): Message {
+export function taskListMessage(
+  tasks: TaskCardData[],
+  opts?: { emptyText?: string; altText?: string },
+): Message {
   if (tasks.length === 0) {
-    return textMessage(`ยังไม่มีงานในกลุ่มนี้ครับ พิมพ์ "สร้างงาน" เพื่อเริ่มเลย`);
+    return textMessage(opts?.emptyText ?? `ยังไม่มีงานในกลุ่มนี้ครับ พิมพ์ "สร้างงาน" เพื่อเริ่มเลย`);
   }
   const shown = tasks.slice(0, 10); // LINE carousel จำกัดสูงสุด 12 bubble ต่อข้อความ
   return {
     type: 'flex',
-    altText: `📋 รายการงานในกลุ่ม (${tasks.length})`,
+    altText: opts?.altText ?? `📋 รายการงาน (${tasks.length})`,
     contents: {
       type: 'carousel',
       contents: shown.map((t) => taskBubble(t)),
+    },
+  };
+}
+
+/** สรุปแพลน + ลิมิตงานค้าง ใช้กับคำสั่ง "แพลนของฉัน" */
+export function planInfoMessage(plan: string, limit: number, current: number): Message {
+  const planText = { FREE: '🆓 FREE', PRO: '⭐ PRO' }[plan] ?? plan;
+  const lines = [
+    `แพลนของคุณ: ${planText}`,
+    `งานค้างตอนนี้: ${current}/${limit}`,
+    plan === 'FREE'
+      ? 'อยากได้ลิมิตเพิ่ม (สูงสุด 15 งาน) ต้องอัปเกรดเป็น PRO — ตอนนี้ยังไม่เปิดรับชำระเงินอัตโนมัติ ติดต่อแอดมินเพื่ออัปเกรดได้ครับ'
+      : 'ขอบคุณที่อัปเกรดเป็น PRO ครับ 🙏',
+  ];
+  return textMessage(lines.join('\n'));
+}
+
+/** การ์ดเปิดฟอร์ม LIFF สำหรับสร้างงาน — ใช้แทนขั้นตอนพิมพ์ทีละอย่างแบบเดิม */
+export function openCreateTaskFormMessage(liffId: string): Message {
+  const url = `https://liff.line.me/${liffId}`;
+  return {
+    type: 'flex',
+    altText: '📝 เปิดฟอร์มสร้างงาน',
+    contents: {
+      type: 'bubble',
+      size: 'kilo',
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: [
+          { type: 'text', text: '📝 สร้างงานใหม่', weight: 'bold', size: 'lg' },
+          {
+            type: 'text',
+            text: 'กดปุ่มด้านล่างเพื่อกรอกฟอร์มสร้างงานได้เลยครับ ใช้งานง่ายกว่าเดิมเยอะ',
+            size: 'sm',
+            color: '#666666',
+            wrap: true,
+            margin: 'md',
+          },
+        ],
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          {
+            type: 'button',
+            style: 'primary',
+            color: '#5B5FEE',
+            height: 'md',
+            action: { type: 'uri', label: 'เปิดฟอร์มสร้างงาน', uri: url },
+          },
+        ],
+      },
     },
   };
 }
@@ -204,10 +271,14 @@ export function helpMessage(): Message {
   return textMessage(
     `${BOT_NAME} — คำสั่งที่ใช้ได้:\n` +
       '• "สร้างงาน" — เริ่มสร้างงานใหม่\n' +
-      '• "งาน" หรือ "list" — ดูรายการงานในกลุ่ม\n' +
+      '• "งาน" หรือ "list" — ดูรายการงานที่ยังไม่เสร็จในกลุ่ม\n' +
+      '• "งานของฉัน" — ดูงานที่ตัวเองรับผิดชอบ\n' +
+      '• "งานของ<ชื่อ>" — ดูงานของคนอื่นในกลุ่ม เช่น "งานของแนน"\n' +
+      '• "ประวัติงาน" — ดูงานที่เสร็จ/ยกเลิกไปแล้ว (ย้อนหลังได้ถึง 1 ปี)\n' +
+      '• "แพลนของฉัน" — ดูระดับผู้ใช้และลิมิตงานค้างสูงสุด\n' +
       '• "ตั้งแจ้งเตือน" — ตั้งค่าการแจ้งเตือนเดดไลน์ของตัวเอง\n' +
       '• "ยกเลิก" — ยกเลิกขั้นตอนที่กำลังทำอยู่\n' +
-      '• กดปุ่มใต้การ์ดงานเพื่อ รับ/เสร็จ/ถอนงาน',
+      '• กดปุ่มใต้การ์ดงานเพื่อ รับ/เสร็จ/ถอนงาน/ลบงาน',
   );
 }
 

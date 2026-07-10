@@ -9,6 +9,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { ConversationModule } from './conversation/conversation.module';
 import { CommandsModule } from './commands/commands.module';
 import { WebhookModule } from './webhook/webhook.module';
+import { LiffModule } from './liff/liff.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { WebhookModule } from './webhook/webhook.module';
     ConversationModule,
     CommandsModule,
     WebhookModule,
+    LiffModule,
   ],
   controllers: [AppController],
 })

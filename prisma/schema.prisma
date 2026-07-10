@@ -14,6 +14,7 @@ model User {
   id           String   @id @default(cuid())
   lineUserId   String   @unique
   displayName  String
+  plan         Plan     @default(FREE) // ระดับผู้ใช้ — กำหนดลิมิตงานค้างสูงสุด (ยังไม่เชื่อมระบบรับเงินจริง)
   createdAt    DateTime @default(now())
 
   memberships          GroupMember[]
@@ -22,6 +23,11 @@ model User {
   taskLogs             TaskLog[]
   notificationPref     NotificationPreference?
   receivedNotifications NotificationSchedule[] @relation("NotificationRecipient")
+}
+
+enum Plan {
+  FREE
+  PRO
 }
 
 model Group {
@@ -35,12 +41,12 @@ model Group {
 }
 
 model GroupMember {
-  id           String   @id @default(cuid())
-  groupId      String
-  userId       String
-  role         Role     @default(MEMBER)
-  maxOpenTasks Int      @default(3) // จำกัดจำนวนงานที่รับพร้อมกันได้
-  joinedAt     DateTime @default(now())
+  id                   String   @id @default(cuid())
+  groupId              String
+  userId               String
+  role                 Role     @default(MEMBER)
+  maxOpenTasksOverride Int?     // ถ้าตั้งไว้ จะข้ามลิมิตตาม Plan ไปใช้ค่านี้แทน (ปรับเป็นรายคนได้)
+  joinedAt             DateTime @default(now())
 
   group        Group    @relation(fields: [groupId], references: [id])
   user         User     @relation(fields: [userId], references: [id])
@@ -72,6 +78,8 @@ model Task {
   assignedTo     User?          @relation("AssignedTasks", fields: [assignedToId], references: [id])
   logs           TaskLog[]
   notifications  NotificationSchedule[]
+
+  @@index([status, updatedAt]) // ใช้กับ job ลบงานเก่าที่ DONE/CANCELLED เกินระยะเก็บข้อมูล
 }
 
 enum Priority {
@@ -99,7 +107,7 @@ model TaskLog {
   action    LogAction
   createdAt DateTime  @default(now())
 
-  task      Task      @relation(fields: [taskId], references: [id])
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
   actor     User      @relation(fields: [actorId], references: [id])
 }
 
@@ -121,7 +129,7 @@ model NotificationSchedule {
   sentAt          DateTime?
   recipientUserId String?   // ผู้รับเฉพาะราย (null = broadcast เข้ากลุ่ม เช่น CLAIMED_BROADCAST)
 
-  task        Task  @relation(fields: [taskId], references: [id])
+  task        Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
   recipient   User? @relation("NotificationRecipient", fields: [recipientUserId], references: [id])
 
   @@index([scheduledAt])
