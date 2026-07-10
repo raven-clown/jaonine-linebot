@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Group } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LineService } from '../line/line.service';
 
@@ -39,7 +40,7 @@ export class UsersService {
       }
     }
 
-    let group: Awaited<ReturnType<typeof this.prisma.group.findUnique>> = null;
+    let group: Group | null = null;
     if (lineGroupId) {
       group = await this.prisma.group.findUnique({ where: { lineGroupId } });
       if (!group) {
